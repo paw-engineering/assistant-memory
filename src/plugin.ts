@@ -1,204 +1,154 @@
 /**
- * Per-Agent Memory Plugin — Plugin Entry Point
+ * OpenClaw IMemoryPlugin factory for assistant-memory.
  *
- * Exposes the plugin to the DWG Assistant host via createPlugin().
- * The host calls initPlugin() to start the plugin and obtain the plugin API.
+ * Usage:
+ *   import { createPlugin } from '@dwg/assistant-memory';
+ *   const plugin = await createPlugin({ agentId: 'programmer' });
+ *   await plugin.start();
+ *
+ * Bootstrap: shared plugin code, per-agent config at
+ *   {workspace}/config/agents/{agentId}/memory-plugin.json
+ *
+ * Versioning: Option A pinned — config/agents/{agentId}/config.json
+ *   must contain plugins.assistant-memory.version matching the running plugin version.
  */
 
-import { loadConfig, validateConfig, resolveDataDir } from "./config.js";
-import type { MemoryPluginConfig } from "./config.js";
-import { logVersion } from "./versioning.js";
+import { createRequire } from "node:module";
+import { MemoryStorage } from "./storage.js";
+import { FtsIndex } from "./index.js";
+import { LMStudioEmbedder } from "./embedder.js";
+import { BackupManager } from "./backup.js";
+import { MemoryManager } from "./memory.js";
+import { loadConfig } from "./config.js";
+import { validateVersion } from "./versioning.js";
+import type { SearchResult } from "./memory.js";
 
-export type { MemoryPluginConfig };
+const require = createRequire(import.meta.url);
 
-export interface MemorySearchResult {
-  id: string;
-  text: string;
-  score: number;
-  timestamp: number;
-  tags: string[];
-  source?: string;
-}
-
-export interface MemoryPluginEvents {
-  onMemoryAdded?: (item: { id: string; text: string; tags: string[] }) => void;
-  onMemoryForgotten?: (id: string) => void;
-  onIndexUpdated?: () => void;
-  onBackupCompleted?: (timestamp: number) => void;
-}
+// ---------------------------------------------------------------------------
+// Plugin interface (OpenClaw IMemoryPlugin)
+// ---------------------------------------------------------------------------
 
 export interface MemoryPlugin {
-  /** Unique agent identifier */
-  agentId: string;
-  /** Add a new memory. Embeds text, stores it, updates the index. */
-  add(text: string, tags?: string[], source?: string): Promise<{ id: string }>;
-  /** Search memories by semantic similarity. Returns top-k results. */
-  search(query: string, k?: number): Promise<MemorySearchResult[]>;
-  /** Retrieve a specific memory by id. */
-  remember(id: string): { id: string; text: string; timestamp: number; tags: string[]; source?: string } | undefined;
-  /** Delete a memory by id. */
-  forget(id: string): Promise<boolean>;
-  /** Get recent memories, newest first. */
-  getRecent(limit?: number): Array<{ id: string; text: string; timestamp: number; tags: string[] }>;
-  /** Get memories by tags. */
-  getByTags(tags: string[], matchAny?: boolean): Array<{ id: string; text: string; timestamp: number; tags: string[] }>;
-  /** Get memory statistics. */
-  stats(): { totalMemories: number; indexSize: number };
-  /** Trigger an immediate backup snapshot. */
-  backupNow(): void;
-  /** Shutdown the plugin, stopping timers and saving state. */
-  shutdown(): void;
+  /** Plugin name — always "assistant-memory" */
+  name: string;
+  /** Plugin semantic version */
+  version: string;
+  /** Start the plugin (index existing memories, start watcher & backup) */
+  start(): Promise<void>;
+  /** Stop the plugin cleanly (close watcher, stop backup, close DB) */
+  stop(): void;
+  /** Full-text search — returns ranked results with content */
+  search(query: string, limit?: number): Promise<SearchResult[]>;
+  /** Add or update a memory entry */
+  add(id: string, content: string, metadata?: Record<string, unknown>): Promise<void>;
+  /** Remove a memory entry by id. Returns true if deleted. */
+  remove(id: string): Promise<boolean>;
+  /** Get memory count and last indexed timestamp */
+  getStats(): Promise<{ count: number; lastIndexed: number | null }>;
 }
 
-type MemoryManager = {
-  add(text: string, tags: string[], source?: string): Promise<import("./storage.js").MemoryItem>;
-  search(query: string, k: number): Promise<import("./memory.js").MemorySearchResult[]>;
-  remember(id: string): import("./storage.js").MemoryItem | undefined;
-  forget(id: string): boolean;
-  getRecent(limit: number): import("./storage.js").MemoryItem[];
-  getByTags(tags: string[], matchAny: boolean): import("./storage.js").MemoryItem[];
-  rebuildIndex(): void;
-  stats(): { totalMemories: number; indexSize: number; storageCount: number };
-  startPeriodicUpdate(): void;
-  stopPeriodicUpdate(): void;
-  backupNow(): void;
-  shutdown(): void;
-};
+// ---------------------------------------------------------------------------
+// VERSION — read from the plugin package's own VERSION file at runtime
+// ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-let managerInstance: MemoryManager | null = null;
+function readPluginVersion(): string {
+  try {
+    const { readFileSync, existsSync } = require("node:fs");
+    const { dirname, resolve } = require("node:path");
+    const { fileURLToPath } = require("node:url");
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const versionFile = resolve(dir, "VERSION");
+    if (!existsSync(versionFile)) return "unknown";
+    return readFileSync(versionFile, "utf-8").trim() || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
 
-async function createManager(
-  config: MemoryPluginConfig,
-  dataDir: string,
-  backupDir: string
-): Promise<MemoryManager> {
-  // Dynamic imports to avoid circular deps
-  const { MemoryManager } = await import("./memory.js");
-  const { MemoryStorage } = await import("./storage.js");
-  const { FaissIndex } = await import("./faiss.js");
-  const { Embedder } = await import("./embedder.js");
-  const { BackupManager } = await import("./backup.js");
+// ---------------------------------------------------------------------------
+// Plugin factory
+// ---------------------------------------------------------------------------
 
-  const storage = new MemoryStorage(dataDir);
-  const index = new FaissIndex(config.embeddingDimension!, dataDir);
-  index.load();
-
-  const embedder = new Embedder({
-    lmStudioUrl: config.lmStudioUrl!,
-    embeddingModel: config.embeddingModel!,
-    embeddingDimension: config.embeddingDimension!,
-    batchSize: config.batchSize,
-  });
-
-  const backup = new BackupManager(
-    dataDir,
-    backupDir,
-    config.maxBackups,
-    config.backupIntervalMs
-  );
-  backup.start();
-
-  const manager = new MemoryManager(
-    storage,
-    index,
-    embedder,
-    backup,
-    config.indexUpdateIntervalMs ?? 30_000
-  );
-
-  manager.startPeriodicUpdate();
-  return manager;
+export interface CreatePluginOptions {
+  /** Agent id — determines config file location and data directory */
+  agentId: string;
+  /** Workspace root (defaults to cwd()) */
+  baseDir?: string;
 }
 
 /**
- * Initialize the memory plugin for a specific agent.
+ * Create and configure a MemoryPlugin for a specific agent.
  *
- * @param agentId - Unique agent identifier
- * @param baseDir - Optional base directory for config resolution (defaults to cwd)
- * @param events - Optional event listeners
+ * Steps:
+ *   1. Load per-agent config from config/agents/{agentId}/memory-plugin.json
+ *   2. Validate version pinning (Option A — blocks startup if version mismatch)
+ *   3. Initialise storage, index, embedder, backup
+ *   4. Return plugin ready for start()
  */
-export async function initPlugin(
-  agentId: string,
-  baseDir?: string,
-  events?: MemoryPluginEvents
-): Promise<MemoryPlugin> {
-  logVersion();
+export async function createPlugin(opts: CreatePluginOptions): Promise<MemoryPlugin> {
+  const { agentId, baseDir } = opts;
 
+  // 1. Load per-agent config
   const config = loadConfig(agentId, baseDir);
-  validateConfig(config);
 
-  const dataDir = resolveDataDir(config);
-  const backupDir = `${dataDir}-backups`;
+  // 2. Version validation — Option A pinned (blocks startup on mismatch)
+  try {
+    validateVersion(agentId);
+  } catch (err) {
+    throw new Error(`[assistant-memory] Version check failed: ${err}`);
+  }
 
-  const manager = await createManager(config, dataDir, backupDir);
-  managerInstance = manager;
+  // 3. Initialise layers
+  const storage = new MemoryStorage(config.dataDir);
+  const index = new FtsIndex(storage);
+  const embedder = new LMStudioEmbedder({
+    baseUrl: config.lmStudioUrl,
+    model: config.lmStudioModel,
+    dimension: config.embeddingDimension,
+  });
+  const backupManager = new BackupManager(storage, {
+    dataDir: config.dataDir,
+    intervalMin: config.backupIntervalMin,
+    maxBackups: config.maxWalBackups,
+  });
+  const manager = new MemoryManager(storage, index, embedder, config);
 
-  return {
-    agentId: config.agentId,
+  const version = readPluginVersion();
 
-    async add(text: string, tags: string[] = [], source?: string) {
-      const item = await manager.add(text, tags, source);
-      events?.onMemoryAdded?.({ id: item.id, text: item.text, tags: item.tags });
-      return { id: item.id };
+  const plugin: MemoryPlugin = {
+    name: "assistant-memory",
+    version,
+
+    async start() {
+      backupManager.start();
+      await manager.start();
+      console.log(`[assistant-memory] started v${version} for agent ${agentId}`);
     },
 
-    async search(query: string, k = 5) {
-      return manager.search(query, k);
+    stop() {
+      manager.stop();
+      backupManager.stop();
+      storage.close();
+      console.log(`[assistant-memory] stopped`);
     },
 
-    remember(id: string) {
-      return manager.remember(id);
+    async search(query, limit) {
+      return manager.search(query, limit);
     },
 
-    async forget(id: string) {
-      const result = manager.forget(id);
-      if (result) events?.onMemoryForgotten?.(id);
-      return result;
+    async add(id, content, metadata) {
+      return manager.add(id, content, metadata);
     },
 
-    getRecent(limit = 10) {
-      return manager.getRecent(limit).map((item) => ({
-        id: item.id,
-        text: item.text,
-        timestamp: item.timestamp,
-        tags: item.tags,
-      }));
+    async remove(id) {
+      return manager.remove(id);
     },
 
-    getByTags(tags: string[], matchAny = true) {
-      return manager.getByTags(tags, matchAny).map((item) => ({
-        id: item.id,
-        text: item.text,
-        timestamp: item.timestamp,
-        tags: item.tags,
-      }));
-    },
-
-    stats() {
-      const s = manager.stats();
-      return { totalMemories: s.totalMemories, indexSize: s.indexSize };
-    },
-
-    backupNow() {
-      manager.backupNow();
-      events?.onBackupCompleted?.(Date.now());
-    },
-
-    shutdown() {
-      manager.shutdown();
-      managerInstance = null;
+    async getStats() {
+      return manager.getStats();
     },
   };
-}
 
-/**
- * Factory for creating a MemoryPlugin instance (used by the host).
- */
-export async function createPlugin(
-  agentId: string,
-  baseDir?: string,
-  events?: MemoryPluginEvents
-): Promise<MemoryPlugin> {
-  return initPlugin(agentId, baseDir, events);
+  return plugin;
 }
