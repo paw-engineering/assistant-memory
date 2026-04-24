@@ -1,7 +1,0 @@
-{
-  "agentId": "programmer",
-  "pinnedVersion": "1.0.0",
-  "pinnedAt": null,
-  "versionEndpoint": "https://paw-engineering.github.io/bot-shared/assistant-memory/version.json",
-  "notes": "Option A (pinned): Marcus controls update cadence. Programmer agent uses this pinned version until Marcus releases an update."
-}

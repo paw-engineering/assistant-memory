@@ -2,6 +2,44 @@
 
 Per-agent memory system for DWG Assistants — TypeScript plugin running on Marcus's VM.
 
+---
+
+## OpenClaw Integration
+
+The `assistant-memory` plugin integrates with OpenClaw as a per-agent memory plugin.
+See [docs/openclaw-bootstrap.md](docs/openclaw-bootstrap.md) for full setup instructions.
+
+**TL;DR for Virt's workspace:**
+
+1. Add to workspace `config.json`:
+```json
+{
+  "plugins": [
+    {
+      "name": "assistant-memory",
+      "version": "1.0.0",
+      "entry": "node_modules/@dwg/assistant-memory/src/index.js"
+    }
+  ]
+}
+```
+
+2. Create per-agent config at `config/agents/virt/memory-plugin.json`:
+```json
+{
+  "agentId": "virt",
+  "lmStudioUrl": "http://192.168.64.1:1234",
+  "embeddingModel": "text-embedding-qwen3-embedding-4b",
+  "dataDir": "data/agents/virt/memory"
+}
+```
+
+OpenClaw calls `createPlugin({ agentId: 'virt' })` and then `plugin.start()`. The
+plugin reads the config, connects to LM Studio, and exposes `search()` / `add()` /
+`remove()` / `getStats()` to the agent.
+
+---
+
 ## Overview
 
 Each DWG Assistant gets its own isolated memory store with:
@@ -11,35 +49,138 @@ Each DWG Assistant gets its own isolated memory store with:
 - **Periodic backup** — 5-minute interval, last 3 snapshots retained
 - **Version metadata** — plugin version logged at startup (Option A, non-blocking)
 
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        OpenClaw Agent                           │
+│                      (e.g. agent "virt")                        │
+└──────────────────────────┬────────────────────────────────────┘
+                           │ createPlugin({ agentId })
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    @dwg/assistant-memory                       │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │                  MemoryPlugin (interface)                 │  │
+│  │  start() / stop() / search() / add() / remove() / stats() │  │
+│  └─────────────────────────┬────────────────────────────────┘  │
+│                            │                                     │
+│  ┌─────────────────────────┴───────────────────────────────┐  │
+│  │                    MemoryManager                          │  │
+│  │   orchestrates: storage + embedder + index + backup       │  │
+│  └──────┬───────────────┬──────────────┬────────────────────┘  │
+│         │               │              │                        │
+│  ┌──────▼──────┐ ┌──────▼──────┐ ┌────▼──────────────┐        │
+│  │  Storage    │ │  Embedder   │ │   FAISS Index      │        │
+│  │  SQLite+FTS │ │ LM Studio  │ │  cosine similarity │        │
+│  └──────┬──────┘ │  /v1/embed  │ └────────────────────┘        │
+│         │        └─────────────┘                               │
+│  ┌──────▼──────────────┐                                       │
+│  │  BackupManager      │                                       │
+│  │  5-min snapshots    │                                       │
+│  │  last N retained    │                                       │
+│  └─────────────────────┘                                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+<!-- text-diagram
+OpenClaw Agent ("virt")
+    │
+    ▼ createPlugin({ agentId })
+┌─────────────────────────────────────────────────┐
+│           @dwg/assistant-memory                 │
+│  ┌──────────────────────────────────────────┐   │
+│  │         MemoryPlugin interface           │   │
+│  │  start() / stop() / search() / add() /   │   │
+│  │  remove() / getStats()                   │   │
+│  └─────────────────────┬────────────────────┘   │
+│                        │                         │
+│  ┌─────────────────────┴───────────────────┐    │
+│  │          MemoryManager                   │    │
+│  │  orchestrates all layers                 │    │
+│  └───┬──────────┬──────────┬───────────────┘    │
+│      │          │          │                    │
+│  ┌───▼──┐  ┌────▼────┐  ┌──▼────────────┐      │
+│  │Storage│  │Embedder │  │ FAISS Index   │      │
+│  │SQLite │  │LM Studio│  │ cosine sim    │      │
+│  │ +FTS5│  │/v1/embed│  └───────────────┘      │
+│  └───┬──┘  └─────────┘                         │
+│      │                                          │
+│  ┌───▼──────────────┐                          │
+│  │  BackupManager   │                          │
+│  │  5-min snapshots │                          │
+│  └──────────────────┘                          │
+└─────────────────────────────────────────────────┘
+-->
+
+```mermaid
+graph TB
+    subgraph Agent["OpenClaw Agent (e.g. 'virt')"]
+    end
+
+    subgraph Plugin["@dwg/assistant-memory"]
+        MI["MemoryPlugin interface
+        start / stop / search / add / remove / getStats"]
+        MM["MemoryManager
+        orchestrates all layers"]
+
+        MI --> MM
+
+        MM --> ST["Storage
+        SQLite + FTS5"]
+        MM --> EM["Embedder
+        LM Studio /v1/embeddings"]
+        MM --> FI["FAISS Index
+        cosine similarity"]
+        MM --> BM["BackupManager
+        5-min snapshots"]
+    end
+
+    Agent -->|"createPlugin({ agentId })"| Plugin
+```
+
+---
+
 ## Quick Start
 
 ```typescript
-import { AgentMemory, loadConfig } from './src/plugin.js';
+import { createPlugin } from '@dwg/assistant-memory';
 
-// Load config (env vars or config file)
-const config = loadConfig({ agentId: 'dwg-assistant-1' });
-const memory = new AgentMemory(config);
+const plugin = await createPlugin({ agentId: 'virt' });
+await plugin.start();
 
-// Add a memory
-const memoryId = memory.addMemory({
-  content: 'User asked about Docker deployment',
-  tags: ['docker', 'deployment'],
-  source: 'context/session-123',
-});
+// Search
+const results = await plugin.search('docker deployment', 5);
 
-// Search (hybrid: BM25 + vector similarity)
-const results = memory.search({ query: 'docker deployment', limit: 5, hybrid: true });
-console.log(results.results);
+// Add
+await plugin.add('session-123', 'User asked about Docker deployment', { tags: ['docker'] });
 
-// Health check
-const health = memory.health();
-console.log(health);
+// Stats
+const stats = await plugin.getStats(); // { count: N, lastIndexed: null }
 
-// Graceful shutdown
-memory.shutdown();
+// Shutdown
+plugin.stop();
 ```
 
 ## Configuration
+
+### Config File (`config/agents/{agentId}/memory-plugin.json`)
+
+Full reference in [docs/plugin-api.md](docs/plugin-api.md).
+
+```json
+{
+  "agentId": "dwg-assistant-1",
+  "persona": "Code Assistant",
+  "systemPrompt": "You are a helpful coding assistant.",
+  "lmStudioUrl": "http://192.168.64.1:1234",
+  "embeddingModel": "text-embedding-qwen3-embedding-4b",
+  "dataDir": "data/agents/dwg-assistant-1/memory",
+  "backupDir": "data/agents/dwg-assistant-1/memory/backups",
+  "backupInterval": 300,
+  "maxBackups": 3
+}
+```
 
 ### Environment Variables
 
@@ -53,32 +194,14 @@ memory.shutdown();
 | `AGENT_MEMORY_BACKUP_DIR` | Backup directory | `{dataDir}/backups` |
 | `AGENT_MEMORY_BACKUP_INTERVAL` | Backup interval (sec) | `300` |
 
-### Config File (`config/agents/{agentId}/memory-plugin.json`)
-
-```json
-{
-  "agentId": "dwg-assistant-1",
-  "persona": "Code Assistant",
-  "systemPrompt": "You are a helpful coding assistant.",
-  "lmStudioUrl": "http://localhost:1234",
-  "embeddingModel": "text-embedding-qwen3-embedding-4b",
-  "dataDir": "data/agents/dwg-assistant-1/memory",
-  "backupDir": "data/agents/dwg-assistant-1/memory/backups",
-  "backupInterval": 300,
-  "maxBackups": 3
-}
-```
-
-See [`config/agents/README.md`](config/agents/README.md) for full field documentation.
-
-## Architecture
+## Internal Architecture
 
 ```
 src/
 ├── index.ts          # Main entry, exports everything
-├── plugin.ts         # AgentMemory class (primary interface)
-├── config.ts         # Config loading from env/file
-├── memory.ts         # MemoryStore (DB + vector index combined)
+├── plugin.ts         # createPlugin factory + MemoryPlugin interface
+├── config.ts         # Config loading from env/file + schema
+├── memory.ts         # MemoryManager (orchestration layer)
 ├── storage.ts        # SQLite + FTS5 operations
 ├── embedder.ts       # LM Studio REST API client
 ├── faiss.ts          # FAISS vector index management
@@ -118,67 +241,18 @@ src/
 
 ## API Reference
 
-### `AgentMemory`
-
-#### Search
-
-```typescript
-const results = memory.search({ query: 'docker deployment', limit: 5, hybrid: true });
-// Returns: { results: MemoryItem[], meta: { total, searchMs, query } }
-```
-
-#### Memory CRUD
-
-```typescript
-const id = memory.addMemory({ content, tags?, source? });
-const updated = memory.updateMemory(id, { content?, tags?, source? });
-const deleted = memory.deleteMemory(id);
-const item = memory.getMemory(id);
-const items = memory.listMemories({ limit?, offset? });
-```
-
-#### System
-
-```typescript
-const health = memory.health();         // DB, embedder, indexer status
-const status = memory.status();         // Stats summary
-const version = memory.getVersion();    // Plugin version info
-const backup = memory.triggerBackup();  // Manual backup trigger
-const backups = memory.listBackups();   // List available backups
-memory.shutdown();                      // Graceful shutdown
-```
+See [docs/plugin-api.md](docs/plugin-api.md) for the full interface and method signatures.
 
 ## Build & Run
 
 ```bash
-# Install dependencies
 npm install
-
-# Type check
-npm run typecheck
-
-# Lint
-npm run lint
-
-# Build (compiles TypeScript to dist/)
 npm run build
-
-# Run in dev mode (with tsx watcher)
-npm run dev
-
-# Run in production
-node dist/plugin.js
-```
-
-## Testing
-
-```bash
+npm run typecheck
 npm test
 ```
 
 ## Docker Integration
-
-Marcus handles Docker deployment. The plugin is mounted into the container:
 
 ```bash
 docker run -v $(pwd)/assistant-memory:/app/plugins/assistant-memory \
@@ -190,8 +264,4 @@ docker run -v $(pwd)/assistant-memory:/app/plugins/assistant-memory \
 
 ## Plugin Version
 
-Current: **1.0.0** (from `src/VERSION`)
-
-Version metadata (Option A, non-blocking): the plugin version is read from `src/VERSION`
-at startup and logged. Marcus owns the update cadence — nothing ships without an
-explicit version bump in the agent's config.
+**1.0.0** (from `VERSION` file)
