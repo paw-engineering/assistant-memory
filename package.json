@@ -1,0 +1,56 @@
+{
+  "name": "@dwg/assistant-memory",
+  "version": "1.0.0",
+  "description": "Per-agent memory plugin with FAISS index, JSON file storage, and LM Studio embeddings",
+  "type": "module",
+  "main": "src/plugin.js",
+  "exports": {
+    ".": {
+      "import": "./src/plugin.js",
+      "types": "./src/plugin.d.ts"
+    },
+    "./config": {
+      "import": "./src/config.js",
+      "types": "./src/config.d.ts"
+    },
+    "./storage": {
+      "import": "./src/storage.js",
+      "types": "./src/storage.d.ts"
+    },
+    "./embedder": {
+      "import": "./src/embedder.js",
+      "types": "./src/embedder.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node --import tsx src/plugin.ts",
+    "dev": "node --import tsx --watch src/plugin.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/ --fix",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "memory",
+    "faiss",
+    "embedding",
+    "lm-studio",
+    "dwg"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "faiss-node": "^0.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.59.0",
+    "@typescript-eslint/parser": "^8.59.0",
+    "eslint": "^9.39.4",
+    "tsx": "^4.19.0",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

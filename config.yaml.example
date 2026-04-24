@@ -1,0 +1,36 @@
+# DWG Assistant Memory Plugin — Per-Agent Configuration
+#
+# Copy this file to config.yaml and customize for each agent.
+# YAML is the primary config format for the DWG Assistant Memory Plugin.
+#
+# Agent ID (required) — must be unique per agent
+agent_id: "dwg-assistant-1"
+
+# LM Studio connection
+lm_studio_url: "http://localhost:1234"
+embedding_model: "text-embedding-qwen3-embedding-4b"
+embedding_dimension: 2560
+batch_size: 32
+
+# Data directories (per-agent isolation)
+# Each agent gets its own db, backups, and data directory
+data_dir: "data/agents/dwg-assistant-1/memory/"
+db_path: "data/agents/dwg-assistant-1/memory/memory.db"
+backup_dir: "data/agents/dwg-assistant-1/memory/backups"
+
+# Directories to watch for changes (future use)
+watch_dirs:
+  - "memory/"
+  - "workspace/"
+
+# Backup settings
+backup_interval: 300    # seconds (5 minutes)
+max_backups: 3           # retain last N backups
+
+# Index rebuild interval (periodic fallback for missing embeddings)
+index_rebuild_interval: 60  # seconds
+
+# Version pinning (Option A) — Marcus controls update cadence
+# Set this to the version you want the agent to run.
+# Agents check this on startup and expose update status via version_check().
+version_pinned: "1.0.0"

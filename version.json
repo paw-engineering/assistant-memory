@@ -1,0 +1,12 @@
+{
+  "version": "1.0.0",
+  "releasedAt": "2026-04-24T00:00:00Z",
+  "changelog": [
+    "Initial release",
+    "Per-agent memory isolation via dedicated vector index",
+    "On-change + periodic (60s) index updates",
+    "5-min backup interval with auto-recovery",
+    "Pinned versioning (Option A) — Marcus controls update cadence"
+  ],
+  "notes": "Pinned version for DWG Assistants. Update pinnedVersion in manifest.json to pull a new release."
+}
