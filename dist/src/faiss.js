@@ -58,12 +58,15 @@ export class FaissIndex {
      * Search for the k nearest neighbors to the given embedding.
      */
     search(embedding, k) {
-        const result = this.index.search(embedding, k);
+        const kSafe = Math.min(k, this.ids.length);
+        if (kSafe === 0)
+            return [];
+        const result = this.index.search(embedding, kSafe);
         const searchResults = [];
         for (let i = 0; i < result.labels.length; i++) {
             const label = result.labels[i];
             if (label === -1)
-                break; // FAISS returns -1 for invalid/padding slots
+                break;
             const intId = Number(label);
             if (intId < 0 || intId >= this.ids.length)
                 break;

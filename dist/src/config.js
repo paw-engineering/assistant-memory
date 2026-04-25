@@ -25,7 +25,7 @@ export const CONFIG_SCHEMA = {
  * Resolved defaults — merged in when config file is absent or fields are missing.
  */
 export const CONFIG_DEFAULTS = {
-    lmStudioUrl: "http://localhost:1234/v1",
+    lmStudioUrl: "http://192.168.64.1:1234/v1",
     embeddingModel: "text-embedding-qwen3-embedding-4b",
     embeddingDimension: 2560,
     batchSize: 32,

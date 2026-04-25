@@ -68,7 +68,7 @@ export declare const CONFIG_SCHEMA: {
  * Resolved defaults — merged in when config file is absent or fields are missing.
  */
 export declare const CONFIG_DEFAULTS: {
-    readonly lmStudioUrl: "http://localhost:1234/v1";
+    readonly lmStudioUrl: "http://192.168.64.1:1234/v1";
     readonly embeddingModel: "text-embedding-qwen3-embedding-4b";
     readonly embeddingDimension: 2560;
     readonly batchSize: 32;

@@ -1,103 +1,85 @@
 /**
- * Per-Agent Memory Plugin — Plugin Entry Point
+ * OpenClaw IMemoryPlugin factory for assistant-memory.
  *
- * Exposes the plugin to the DWG Assistant host via createPlugin().
- * The host calls initPlugin() to start the plugin and obtain the plugin API.
+ * Usage:
+ *   import { createPlugin } from '@dwg/assistant-memory';
+ *   const plugin = await createPlugin({ agentId: 'programmer' });
+ *   await plugin.start();
  */
-import { loadConfig, validateConfig, resolveDataDir } from "./config.js";
-import { logVersion } from "./versioning.js";
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-let managerInstance = null;
-async function createManager(config, dataDir, backupDir) {
-    // Dynamic imports to avoid circular deps
-    const { MemoryManager } = await import("./memory.js");
-    const { MemoryStorage } = await import("./storage.js");
-    const { FaissIndex } = await import("./faiss.js");
-    const { Embedder } = await import("./embedder.js");
-    const { BackupManager } = await import("./backup.js");
-    const storage = new MemoryStorage(dataDir);
-    const index = new FaissIndex(config.embeddingDimension, dataDir);
-    index.load();
+export async function createPlugin(opts) {
+    const { agentId } = opts;
+    const [{ MemoryStorage }, { FaissIndex }, { Embedder }, { BackupManager }, { MemoryManager }, configModule, versioningModule] = await Promise.all([
+        import("./storage.js"),
+        import("./faiss.js"),
+        import("./embedder.js"),
+        import("./backup.js"),
+        import("./memory.js"),
+        import("./config.js"),
+        import("./versioning.js"),
+    ]);
+    const { loadConfig } = configModule;
+    const { logVersion, readVersion } = versioningModule;
+    // Load per-agent config
+    const config = loadConfig(agentId);
+    logVersion();
+    const resolvedDataDir = config.dataDir ?? `data/agents/${agentId}/memory`;
+    const backupDir = `${resolvedDataDir}/backups`;
+    const indexUpdateIntervalMs = config.indexUpdateIntervalMs ?? 30_000;
+    // Initialise layers
+    const storage = new MemoryStorage(resolvedDataDir);
     const embedder = new Embedder({
-        lmStudioUrl: config.lmStudioUrl,
-        embeddingModel: config.embeddingModel,
-        embeddingDimension: config.embeddingDimension,
+        lmStudioUrl: config.lmStudioUrl ?? "http://192.168.64.1:1234",
+        embeddingModel: config.embeddingModel ?? "text-embedding-qwen3-embedding-4b",
+        embeddingDimension: config.embeddingDimension ?? 2560,
         batchSize: config.batchSize,
     });
-    const backup = new BackupManager(dataDir, backupDir, config.maxBackups, config.backupIntervalMs);
-    backup.start();
-    const manager = new MemoryManager(storage, index, embedder, backup, config.indexUpdateIntervalMs ?? 30_000);
-    manager.startPeriodicUpdate();
-    return manager;
-}
-/**
- * Initialize the memory plugin for a specific agent.
- *
- * @param agentId - Unique agent identifier
- * @param baseDir - Optional base directory for config resolution (defaults to cwd)
- * @param events - Optional event listeners
- */
-export async function initPlugin(agentId, baseDir, events) {
-    logVersion();
-    const config = loadConfig(agentId, baseDir);
-    validateConfig(config);
-    const dataDir = resolveDataDir(config);
-    const backupDir = `${dataDir}-backups`;
-    const manager = await createManager(config, dataDir, backupDir);
-    managerInstance = manager;
-    return {
-        agentId: config.agentId,
-        async add(text, tags = [], source) {
-            const item = await manager.add(text, tags, source);
-            events?.onMemoryAdded?.({ id: item.id, text: item.text, tags: item.tags });
-            return { id: item.id };
+    const backupManager = new BackupManager(resolvedDataDir, backupDir, config.maxBackups ?? 3, config.backupIntervalMs ?? 300_000);
+    const index = new FaissIndex(config.embeddingDimension ?? 2560, resolvedDataDir);
+    const manager = new MemoryManager(storage, index, embedder, backupManager, indexUpdateIntervalMs);
+    const { version } = readVersion();
+    const plugin = {
+        name: "assistant-memory",
+        version,
+        async start() {
+            try {
+                manager.rebuildIndex();
+            }
+            catch (err) {
+                console.warn(`[assistant-memory] Initial index rebuild failed: ${err}`);
+            }
+            try {
+                backupManager.start();
+            }
+            catch (err) {
+                console.warn(`[assistant-memory] Backup manager failed to start: ${err}`);
+            }
+            manager.startPeriodicUpdate();
+            console.log(`[assistant-memory] started v${version} for agent ${agentId}`);
         },
-        async search(query, k = 5) {
-            return manager.search(query, k);
+        stop() {
+            try {
+                manager.stopPeriodicUpdate();
+                backupManager.stop();
+            }
+            catch (err) {
+                console.warn(`[assistant-memory] Error during shutdown: ${err}`);
+            }
+            console.log(`[assistant-memory] stopped`);
         },
-        remember(id) {
-            return manager.remember(id);
+        async search(query, limit = 5) {
+            return manager.search(query, limit);
         },
-        async forget(id) {
-            const result = manager.forget(id);
-            if (result)
-                events?.onMemoryForgotten?.(id);
-            return result;
+        async add(id, content) {
+            await manager.add(content, [], `id:${id}`);
         },
-        getRecent(limit = 10) {
-            return manager.getRecent(limit).map((item) => ({
-                id: item.id,
-                text: item.text,
-                timestamp: item.timestamp,
-                tags: item.tags,
-            }));
+        async remove(id) {
+            return manager.forget(id);
         },
-        getByTags(tags, matchAny = true) {
-            return manager.getByTags(tags, matchAny).map((item) => ({
-                id: item.id,
-                text: item.text,
-                timestamp: item.timestamp,
-                tags: item.tags,
-            }));
-        },
-        stats() {
+        async getStats() {
             const s = manager.stats();
-            return { totalMemories: s.totalMemories, indexSize: s.indexSize };
-        },
-        backupNow() {
-            manager.backupNow();
-            events?.onBackupCompleted?.(Date.now());
-        },
-        shutdown() {
-            manager.shutdown();
-            managerInstance = null;
+            return { count: s.totalMemories, lastIndexed: null };
         },
     };
-}
-/**
- * Factory for creating a MemoryPlugin instance (used by the host).
- */
-export async function createPlugin(agentId, baseDir, events) {
-    return initPlugin(agentId, baseDir, events);
+    return plugin;
 }
 //# sourceMappingURL=plugin.js.map

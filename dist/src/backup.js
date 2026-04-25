@@ -17,7 +17,7 @@ export class BackupManager {
     maxBackups;
     intervalMs;
     timer = null;
-    constructor(dataDir, backupDir, maxBackups = 3, intervalMs = 300_000) {
+    constructor(dataDir, backupDir, maxBackups = 3, intervalMs = 3_600_000) {
         this.dataDir = resolve(dataDir);
         this.backupDir = resolve(backupDir);
         this.maxBackups = maxBackups;

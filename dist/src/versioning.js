@@ -1,5 +1,5 @@
 /**
- * Option A (pinned) — Version metadata for the per-agent memory plugin.
+ * Option B (base image update model) — Version metadata for the per-agent memory plugin.
  *
  * The plugin version is read from the VERSION file at startup and logged.
  * If the VERSION file is missing or malformed, startup continues but logs a warning.
