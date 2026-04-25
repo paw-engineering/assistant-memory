@@ -6,80 +6,55 @@
  *   const plugin = await createPlugin({ agentId: 'programmer' });
  *   await plugin.start();
  */
+// ── Plugin Factory ───────────────────────────────────────────────────────────
 export async function createPlugin(opts) {
     const { agentId } = opts;
-    const [{ MemoryStorage }, { FaissIndex }, { Embedder }, { BackupManager }, { MemoryManager }, configModule, versioningModule] = await Promise.all([
-        import("./storage.js"),
-        import("./faiss.js"),
-        import("./embedder.js"),
-        import("./backup.js"),
-        import("./memory.js"),
+    const [{ loadConfig }, { initDb, upsertMemoryItem, getMemoryItem, deleteMemoryItem, getStats }, { startWatcher, stopWatcher }, versioning,] = await Promise.all([
         import("./config.js"),
+        import("./db.js"),
+        import("./indexer.js"),
         import("./versioning.js"),
     ]);
-    const { loadConfig } = configModule;
-    const { logVersion, readVersion } = versioningModule;
-    // Load per-agent config
     const config = loadConfig(agentId);
-    logVersion();
-    const resolvedDataDir = config.dataDir ?? `data/agents/${agentId}/memory`;
-    const backupDir = `${resolvedDataDir}/backups`;
-    const indexUpdateIntervalMs = config.indexUpdateIntervalMs ?? 30_000;
-    // Initialise layers
-    const storage = new MemoryStorage(resolvedDataDir);
-    const embedder = new Embedder({
-        lmStudioUrl: config.lmStudioUrl ?? "http://192.168.64.1:1234",
-        embeddingModel: config.embeddingModel ?? "text-embedding-qwen3-embedding-4b",
-        embeddingDimension: config.embeddingDimension ?? 2560,
-        batchSize: config.batchSize,
-    });
-    const backupManager = new BackupManager(resolvedDataDir, backupDir, config.maxBackups ?? 3, config.backupIntervalMs ?? 300_000);
-    const index = new FaissIndex(config.embeddingDimension ?? 2560, resolvedDataDir);
-    const manager = new MemoryManager(storage, index, embedder, backupManager, indexUpdateIntervalMs);
-    const { version } = readVersion();
-    const plugin = {
-        name: "assistant-memory",
+    versioning.logVersion();
+    const dataDir = config.dataDir ?? `data/agents/${agentId}/memory`;
+    const backupDir = `${dataDir}/backups`;
+    // Init DB immediately so storage is available
+    initDb();
+    let watchInterval = null;
+    versioning.logVersion();
+    const { version } = versioning.readVersion() ?? { version: "1.0.0" };
+    return {
+        name: "@dwg/assistant-memory",
         version,
         async start() {
-            try {
-                manager.rebuildIndex();
+            // Start file watcher if dirs configured
+            if (config.watchDirs?.length) {
+                startWatcher({ watchDirs: config.watchDirs });
             }
-            catch (err) {
-                console.warn(`[assistant-memory] Initial index rebuild failed: ${err}`);
-            }
-            try {
-                backupManager.start();
-            }
-            catch (err) {
-                console.warn(`[assistant-memory] Backup manager failed to start: ${err}`);
-            }
-            manager.startPeriodicUpdate();
-            console.log(`[assistant-memory] started v${version} for agent ${agentId}`);
+            console.log(`[assistant-memory] started v${version} for agent ${agentId}, dataDir=${dataDir}`);
         },
         stop() {
-            try {
-                manager.stopPeriodicUpdate();
-                backupManager.stop();
-            }
-            catch (err) {
-                console.warn(`[assistant-memory] Error during shutdown: ${err}`);
-            }
+            stopWatcher();
+            if (watchInterval)
+                clearInterval(watchInterval);
             console.log(`[assistant-memory] stopped`);
         },
         async search(query, limit = 5) {
-            return manager.search(query, limit);
+            const { hybridSearch } = await import("./search.js");
+            return hybridSearch(query, limit);
         },
-        async add(id, content) {
-            await manager.add(content, [], `id:${id}`);
+        async add(id, content, metadata) {
+            const now = Date.now();
+            upsertMemoryItem({ id, content, metadata: metadata ?? {}, createdAt: now, updatedAt: now });
         },
         async remove(id) {
-            return manager.forget(id);
+            return deleteMemoryItem(id);
         },
         async getStats() {
-            const s = manager.stats();
-            return { count: s.totalMemories, lastIndexed: null };
+            const s = getStats();
+            return { count: s.totalMemories + s.indexedFiles, lastIndexed: null };
         },
     };
-    return plugin;
 }
 //# sourceMappingURL=plugin.js.map

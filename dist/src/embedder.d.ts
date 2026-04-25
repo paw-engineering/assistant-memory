@@ -31,4 +31,6 @@ export declare class Embedder {
     getDimension(): number;
     getModel(): string;
 }
+/** Standalone query embedding (uses singleton embedder instance) */
+export declare function embedQuery(text: string): Promise<number[] | null>;
 //# sourceMappingURL=embedder.d.ts.map

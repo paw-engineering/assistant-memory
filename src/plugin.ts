@@ -7,15 +7,13 @@
  *   await plugin.start();
  */
 
-import type { MemorySearchResult } from "./memory.js";
+import type { MemorySearchResult, MemoryItem } from "./types.js";
 import type { MemoryPluginConfig } from "./config.js";
 
-// Re-export types for consumers
 export type { MemoryPluginConfig };
+export interface CreatePluginOptions { agentId: string; baseDir?: string; }
 
-// ---------------------------------------------------------------------------
-// Plugin interface (OpenClaw IMemoryPlugin)
-// ---------------------------------------------------------------------------
+// ── Plugin Interface (IMemoryPlugin) ─────────────────────────────────────────
 
 export interface MemoryPlugin {
   readonly name: string;
@@ -28,106 +26,75 @@ export interface MemoryPlugin {
   getStats(): Promise<{ count: number; lastIndexed: number | null }>;
 }
 
-// ---------------------------------------------------------------------------
-// Plugin factory
-// ---------------------------------------------------------------------------
-
-export interface CreatePluginOptions {
-  agentId: string;
-  baseDir?: string;
-}
+// ── Plugin Factory ───────────────────────────────────────────────────────────
 
 export async function createPlugin(opts: CreatePluginOptions): Promise<MemoryPlugin> {
   const { agentId } = opts;
 
-  const [{ MemoryStorage }, { FaissIndex }, { Embedder }, { BackupManager }, { MemoryManager }, configModule, versioningModule] =
-    await Promise.all([
-      import("./storage.js"),
-      import("./faiss.js"),
-      import("./embedder.js"),
-      import("./backup.js"),
-      import("./memory.js"),
-      import("./config.js"),
-      import("./versioning.js"),
-    ]);
+  const [
+    { loadConfig },
+    { initDb, upsertMemoryItem, getMemoryItem, deleteMemoryItem, getStats },
+    { startWatcher, stopWatcher },
+    versioning,
+  ] = await Promise.all([
+    import("./config.js"),
+    import("./db.js"),
+    import("./indexer.js"),
+    import("./versioning.js"),
+  ]);
 
-  const { loadConfig } = configModule;
-  const { logVersion, readVersion } = versioningModule;
+  const config: MemoryPluginConfig & { indexUpdateIntervalMs?: number; watchDirs?: string[] } =
+    loadConfig(agentId);
 
-  // Load per-agent config
-  const config: MemoryPluginConfig & { indexUpdateIntervalMs?: number } = loadConfig(agentId);
+  versioning.logVersion();
 
-  logVersion();
+  const dataDir = config.dataDir ?? `data/agents/${agentId}/memory`;
+  const backupDir = `${dataDir}/backups`;
 
-  const resolvedDataDir = config.dataDir ?? `data/agents/${agentId}/memory`;
-  const backupDir = `${resolvedDataDir}/backups`;
-  const indexUpdateIntervalMs = config.indexUpdateIntervalMs ?? 30_000;
+  // Init DB immediately so storage is available
+  initDb();
+  
+  let watchInterval: NodeJS.Timeout | null = null;
 
-  // Initialise layers
-  const storage = new MemoryStorage(resolvedDataDir);
-  const embedder = new Embedder({
-    lmStudioUrl: config.lmStudioUrl ?? "http://192.168.64.1:1234",
-    embeddingModel: config.embeddingModel ?? "text-embedding-qwen3-embedding-4b",
-    embeddingDimension: config.embeddingDimension ?? 2560,
-    batchSize: config.batchSize,
-  });
-  const backupManager = new BackupManager(
-    resolvedDataDir,
-    backupDir,
-    config.maxBackups ?? 3,
-    config.backupIntervalMs ?? 300_000
-  );
-  const index = new FaissIndex(config.embeddingDimension ?? 2560, resolvedDataDir);
-  const manager = new MemoryManager(storage, index, embedder, backupManager, indexUpdateIntervalMs);
+  versioning.logVersion();
 
-  const { version } = readVersion();
+  const { version } = versioning.readVersion() ?? { version: "1.0.0" };
 
-  const plugin: MemoryPlugin = {
-    name: "assistant-memory",
+  return {
+    name: "@dwg/assistant-memory",
     version,
 
     async start() {
-      try {
-        manager.rebuildIndex();
-      } catch (err) {
-        console.warn(`[assistant-memory] Initial index rebuild failed: ${err}`);
+      // Start file watcher if dirs configured
+      if (config.watchDirs?.length) {
+        startWatcher({ watchDirs: config.watchDirs });
       }
-      try {
-        backupManager.start();
-      } catch (err) {
-        console.warn(`[assistant-memory] Backup manager failed to start: ${err}`);
-      }
-      manager.startPeriodicUpdate();
-      console.log(`[assistant-memory] started v${version} for agent ${agentId}`);
+      console.log(`[assistant-memory] started v${version} for agent ${agentId}, dataDir=${dataDir}`);
     },
 
     stop() {
-      try {
-        manager.stopPeriodicUpdate();
-        backupManager.stop();
-      } catch (err) {
-        console.warn(`[assistant-memory] Error during shutdown: ${err}`);
-      }
+      stopWatcher();
+      if (watchInterval) clearInterval(watchInterval);
       console.log(`[assistant-memory] stopped`);
     },
 
-    async search(query, limit = 5): Promise<MemorySearchResult[]> {
-      return manager.search(query, limit);
+    async search(query: string, limit = 5): Promise<MemorySearchResult[]> {
+      const { hybridSearch } = await import("./search.js");
+      return hybridSearch(query, limit);
     },
 
-    async add(id, content) {
-      await manager.add(content, [], `id:${id}`);
+    async add(id: string, content: string, metadata?: Record<string, unknown>) {
+      const now = Date.now();
+      upsertMemoryItem({ id, content, metadata: metadata ?? {}, createdAt: now, updatedAt: now });
     },
 
-    async remove(id): Promise<boolean> {
-      return manager.forget(id);
+    async remove(id: string): Promise<boolean> {
+      return deleteMemoryItem(id);
     },
 
     async getStats() {
-      const s = manager.stats();
-      return { count: s.totalMemories, lastIndexed: null };
+      const s = getStats();
+      return { count: s.totalMemories + s.indexedFiles, lastIndexed: null };
     },
   };
-
-  return plugin;
 }

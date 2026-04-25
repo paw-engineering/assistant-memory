@@ -6,9 +6,13 @@
  *   const plugin = await createPlugin({ agentId: 'programmer' });
  *   await plugin.start();
  */
-import type { MemorySearchResult } from "./memory.js";
+import type { MemorySearchResult } from "./types.js";
 import type { MemoryPluginConfig } from "./config.js";
 export type { MemoryPluginConfig };
+export interface CreatePluginOptions {
+    agentId: string;
+    baseDir?: string;
+}
 export interface MemoryPlugin {
     readonly name: string;
     readonly version: string;
@@ -21,10 +25,6 @@ export interface MemoryPlugin {
         count: number;
         lastIndexed: number | null;
     }>;
-}
-export interface CreatePluginOptions {
-    agentId: string;
-    baseDir?: string;
 }
 export declare function createPlugin(opts: CreatePluginOptions): Promise<MemoryPlugin>;
 //# sourceMappingURL=plugin.d.ts.map

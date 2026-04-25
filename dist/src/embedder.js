@@ -83,4 +83,18 @@ export class Embedder {
         return this.embeddingModel;
     }
 }
+/** Standalone query embedding (uses singleton embedder instance) */
+export async function embedQuery(text) {
+    try {
+        const embedder = new Embedder({
+            lmStudioUrl: "http://192.168.64.1:1234/v1",
+            embeddingModel: "text-embedding-qwen3-embedding-4b",
+            embeddingDimension: 2560,
+        });
+        return await embedder.embedText(text);
+    }
+    catch {
+        return null;
+    }
+}
 //# sourceMappingURL=embedder.js.map
